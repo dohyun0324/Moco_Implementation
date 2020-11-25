@@ -81,14 +81,21 @@ img_size = (32, 32)
 color_jitter = transforms.ColorJitter(0.8, 0.8, 0.8, 0.2)
 
 train_transform = DuplicatedCompose([
-    transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+    ### IMPLEMENTATION 2-1 ###
+    ### 1. Random resized crop w/ final size of (32, 32)
+    ### 2. Random horizontal flip w/ p=0.5
+    ### 3. Randomly apply the pre-defined color jittering w/ p=0.8
+    ### 4. Random gray scale w/ p=0.2
+    ### 5. Gaussian blur w/ kernel size of 1/10 of the image width or height (32)
+    transforms.RandomResizedCrop(size=(32,32)),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomApply([color_jitter],p=0.8),
     transforms.RandomGrayscale(p=0.2),
-    transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
-    transforms.RandomHorizontalFlip(),
+    GaussianBlur(kernel_size=int(0.1*32)),
+    ### IMPLEMENTATION ENDS HERE ###
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
 ])
+
 
 from torch.utils.data import DataLoader
 
@@ -108,7 +115,7 @@ train_loader = DataLoader(train_dataset,
 
 class NTXentLoss(torch.nn.Module):
 
-    def __init__(self, batch_size, temperature, use_cosine_similarity):
+    def __init__(self, encoder, batch_size, temperature, use_cosine_similarity):
         super(NTXentLoss, self).__init__()
         self.batch_size = batch_size
         self.temperature = temperature
@@ -116,36 +123,17 @@ class NTXentLoss(torch.nn.Module):
         self.mask_samples_from_same_repr = self._get_correlated_mask().type(torch.bool)
         self.similarity_function = self._get_similarity_function(use_cosine_similarity)
         self.criterion = torch.nn.CrossEntropyLoss(reduction="sum")
+        
 
-    def _get_similarity_function(self, use_cosine_similarity):
-        if use_cosine_similarity:
-            self._cosine_similarity = torch.nn.CosineSimilarity(dim=-1)
-            return self._cosine_simililarity
-        else:
-            return self._dot_simililarity
+        self.q_encoder = encoder(num_classes = 128)
+        self.k_encoder = encoder(num_classes = 128)
+        for pq, pk in zip(self.q_encoder.parameters(), self.k_encoder.parameters()):
+            pk.data.copy_(pq.data)  # initialize
+            pk.requires_grad = False  # not update by gradient
 
-    def _get_correlated_mask(self):
-        diag = np.eye(2 * self.batch_size)
-        l1 = np.eye((2 * self.batch_size), 2 * self.batch_size, k=-self.batch_size)
-        l2 = np.eye((2 * self.batch_size), 2 * self.batch_size, k=self.batch_size)
-        mask = torch.from_numpy((diag + l1 + l2))
-        mask = (1 - mask).type(torch.bool)
-        return mask.cuda()
-
-    @staticmethod
-    def _dot_simililarity(x, y):
-        v = torch.tensordot(x.unsqueeze(1), y.T.unsqueeze(0), dims=2)
-        # x shape: (N, 1, C)
-        # y shape: (1, C, 2N)
-        # v shape: (N, 2N)
-        return v
-
-    def _cosine_simililarity(self, x, y):
-        # x shape: (N, 1, C)
-        # y shape: (1, 2N, C)
-        # v shape: (N, 2N)
-        v = self._cosine_similarity(x.unsqueeze(1), y.unsqueeze(0))
-        return v
+        self.register_buffer("queue", torch.randn(dim, K))
+        self.queue = nn.functional.normalize(self.queue, dim=0)
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
     def forward(self, zis, zjs):
         representations = torch.cat([zjs, zis], dim=0)
@@ -243,7 +231,7 @@ class SGD_with_lars(Optimizer):
 
 def train(net, loader):
     
-    loss_fn = NTXentLoss(encoder = models.resnet50, batch_size=256, temperature=0.05, use_cosine_similarity=True)
+    loss_fn = NTXentLoss(encoder = models.resnet26, batch_size=256, temperature=0.05, use_cosine_similarity=True)
     
     ### IMPLEMENTATION 4-2 ###
     ### 1. Use SGD_with_lars with
