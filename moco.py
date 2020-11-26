@@ -12,7 +12,33 @@ import os
 import time
 import math
 from torchvision.models.resnet import conv3x3
-import torchvision.models as models
+class BasicBlock(nn.Module):
+    def __init__(self, inplanes, planes, norm_layer, stride=1, downsample=None):
+        super(BasicBlock, self).__init__()
+        self.downsample = downsample
+        self.stride = stride
+        
+        self.bn1 = norm_layer(inplanes)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        
+        self.bn2 = norm_layer(planes)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+
+    def forward(self, x):
+        residual = x 
+        residual = self.bn1(residual)
+        residual = self.relu1(residual)
+        residual = self.conv1(residual)
+
+        residual = self.bn2(residual)
+        residual = self.relu2(residual)
+        residual = self.conv2(residual)
+
+        if self.downsample is not None:
+            x = self.downsample(x)
+        return x + residual
 
 class Downsample(nn.Module):
     def __init__(self, nIn, nOut, stride):
@@ -25,6 +51,50 @@ class Downsample(nn.Module):
         x = self.avg(x)
         return torch.cat([x] + [x.mul(0)] * (self.expand_ratio - 1), 1)
 
+class ResNetCifar(nn.Module):
+    def __init__(self, depth, width=1, classes=10, channels=3, norm_layer=nn.BatchNorm2d):
+        assert (depth - 2) % 6 == 0         # depth is 6N+2
+        self.N = (depth - 2) // 6
+        super(ResNetCifar, self).__init__()
+
+        # Following the Wide ResNet convention, we fix the very first convolution
+        self.conv1 = nn.Conv2d(channels, 16, kernel_size=3, stride=1, padding=1, bias=False)
+        self.inplanes = 16
+        self.layer1 = self._make_layer(norm_layer, 16 * width)
+        self.layer2 = self._make_layer(norm_layer, 32 * width, stride=2)
+        self.layer3 = self._make_layer(norm_layer, 64 * width, stride=2)
+        self.bn = norm_layer(64 * width)
+        self.relu = nn.ReLU(inplace=True)
+        self.avgpool = nn.AvgPool2d(8)
+
+        # Initialization
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+                
+    def _make_layer(self, norm_layer, planes, stride=1):
+        downsample = None
+        if stride != 1 or self.inplanes != planes:
+            downsample = Downsample(self.inplanes, planes, stride)
+        layers = [BasicBlock(self.inplanes, planes, norm_layer, stride, downsample)]
+        self.inplanes = planes
+        for i in range(self.N - 1):
+            layers.append(BasicBlock(self.inplanes, planes, norm_layer))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        return x
+
+    
 class Normalize(nn.Module):
 
     def __init__(self, power=2):
@@ -81,18 +151,11 @@ img_size = (32, 32)
 color_jitter = transforms.ColorJitter(0.8, 0.8, 0.8, 0.2)
 
 train_transform = DuplicatedCompose([
-    ### IMPLEMENTATION 2-1 ###
-    ### 1. Random resized crop w/ final size of (32, 32)
-    ### 2. Random horizontal flip w/ p=0.5
-    ### 3. Randomly apply the pre-defined color jittering w/ p=0.8
-    ### 4. Random gray scale w/ p=0.2
-    ### 5. Gaussian blur w/ kernel size of 1/10 of the image width or height (32)
     transforms.RandomResizedCrop(size=(32,32)),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomApply([color_jitter],p=0.8),
     transforms.RandomGrayscale(p=0.2),
     GaussianBlur(kernel_size=int(0.1*32)),
-    ### IMPLEMENTATION ENDS HERE ###
     transforms.ToTensor(),
 ])
 
@@ -113,53 +176,81 @@ train_loader = DataLoader(train_dataset,
                          )
 
 
-class NTXentLoss(torch.nn.Module):
+class Moco(torch.nn.Module):
 
-    def __init__(self, encoder, batch_size, temperature, use_cosine_similarity):
-        super(NTXentLoss, self).__init__()
+    def __init__(self, batch_size, temperature):
+        super(Moco, self).__init__()
         self.batch_size = batch_size
         self.temperature = temperature
         self.softmax = torch.nn.Softmax(dim=-1)
-        self.mask_samples_from_same_repr = self._get_correlated_mask().type(torch.bool)
-        self.similarity_function = self._get_similarity_function(use_cosine_similarity)
         self.criterion = torch.nn.CrossEntropyLoss(reduction="sum")
         
 
-        self.q_encoder = encoder(num_classes = 128)
-        self.k_encoder = encoder(num_classes = 128)
-        for pq, pk in zip(self.q_encoder.parameters(), self.k_encoder.parameters()):
+        self.f_q = ResNetCifar(depth=26, width=1, classes=10)
+        self.f_k = ResNetCifar(depth=26, width=1, classes=10)
+        for pq, pk in zip(self.f_q.parameters(), self.f_k.parameters()):
             pk.data.copy_(pq.data)  # initialize
             pk.requires_grad = False  # not update by gradient
 
-        self.register_buffer("queue", torch.randn(dim, K))
+        self.K = 4096
+        self.m = 0.99
+        self.T = temperature
+        self.register_buffer("queue", torch.randn(64, self.K))
         self.queue = nn.functional.normalize(self.queue, dim=0)
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
-    def forward(self, zis, zjs):
-        representations = torch.cat([zjs, zis], dim=0)
+    @torch.no_grad()
+    def _momentum_update_key_encoder(self):
+        for pq, pk in zip(self.f_q.parameters(), self.f_k.parameters()):
+            pk.data = pk.data * self.m + pq.data * (1. - self.m)
 
-        similarity_matrix = self.similarity_function(representations, representations)
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, keys):
+        batch_size = keys.shape[0]
 
-        # filter out the scores from the positive samples
-        l_pos = torch.diag(similarity_matrix, self.batch_size)
-        r_pos = torch.diag(similarity_matrix, -self.batch_size)
-     #   print(l_pos)
-       # print(r_pos)
-        positives = torch.cat([l_pos, r_pos]).view(2 * self.batch_size, 1)
+        ptr = int(self.queue_ptr)
+        assert self.K % batch_size == 0  
+        self.queue[:, ptr:ptr + batch_size] = keys.t()  # transpose
+        ptr = (ptr + batch_size) % self.K  # move pointer
 
-        negatives = similarity_matrix[self.mask_samples_from_same_repr].view(2 * self.batch_size, -1)
+        self.queue_ptr[0] = ptr
 
-        logits = torch.cat((positives, negatives), dim=1)
-        logits = logits / self.temperature
-       # print(positives.shape)
-     #   print(negatives.shape)
-       # print(logits.shape)
+    @torch.no_grad()
+    def _batch_shuffle_single_gpu(self, x):
+        idx_shuffle = torch.randperm(x.shape[0]).cuda()
+        idx_unshuffle = torch.argsort(idx_shuffle)
 
-        labels = torch.zeros(2 * self.batch_size).cuda().long()
-#        print(labels)
+        return x[idx_shuffle], idx_unshuffle
+
+    @torch.no_grad()
+    def _batch_unshuffle_single_gpu(self, x, idx_unshuffle):
+        return x[idx_unshuffle]
+
+    def forward(self, x_q, x_k):
+        with torch.no_grad():  # no gradient to keys
+            self._momentum_update_key_encoder()
+
+        q = self.f_q(x_q)
+        q = nn.functional.normalize(q, dim=1)  # already normalized
+        with torch.no_grad():
+            x_k_, idx_unshuffle = self._batch_shuffle_single_gpu(x_k)
+
+            k = self.f_k(x_k_)  # keys: NxC
+            k = nn.functional.normalize(k, dim=1)  # already normalized
+            k = self._batch_unshuffle_single_gpu(k, idx_unshuffle)
+
+        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+       # print(q.shape,k.shape)
+        #print(q.shape,self.queue.shape)
+        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
+        
+        logits = torch.cat([l_pos, l_neg], dim=1)
+        logits /= self.T
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
         loss = self.criterion(logits, labels)
+        self._dequeue_and_enqueue(k)
      #   print(loss)
-        return loss / (2 * self.batch_size)
+        return loss
 
 from torch.optim.optimizer import Optimizer, required
 
@@ -230,26 +321,14 @@ class SGD_with_lars(Optimizer):
         return loss
 
 def train(net, loader):
-    
-    loss_fn = NTXentLoss(encoder = models.resnet26, batch_size=256, temperature=0.05, use_cosine_similarity=True)
-    
-    ### IMPLEMENTATION 4-2 ###
-    ### 1. Use SGD_with_lars with
-    ### lr = 0.1 * batch_size / 256
-    ### momentum = 0.9
-    ### weight_decay = 1e-6
     optimizer = SGD_with_lars(net.parameters(), lr=0.1, momentum = 0.9, weight_decay = 1e-6)
     
     from warmup_scheduler import GradualWarmupScheduler
-    ### 2. Use GradualWarmupScheduler with
-    ### multiplier = 1
-    ### total_epoch = 1/10 of total epochs
-    ### after_scheduler = optim.lr_scheduler.CosineAnnealingLR
     scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=20, after_scheduler=optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=180))
     
     train_start = time.time()
     
-    for epoch in range(1, 200 + 1):
+    for epoch in range(1, 50 + 1):
         train_loss = 0
         net.train()
         epoch_start = time.time()
@@ -263,7 +342,7 @@ def train(net, loader):
             
             dat1 = data[0].cuda()
             dat2 = data[1].cuda()
-            loss = loss_fn(dat1, dat2)
+            loss = net(dat1, dat2)
             ### IMPLEMENTATION ENDS HERE ###
             
             train_loss += loss.item()
@@ -285,27 +364,47 @@ def train(net, loader):
 
 GPU_NUM = '0'
 os.environ["CUDA_VISIBLE_DEVICES"] = GPU_NUM
-
-net = SimCLRNet(26, 1, 10, 32)
+'''
+net = Moco(256, 0.05)
 
 net.cuda()
 train(net, train_loader)
 torch.save(net.state_dict(), '../../../home_klimt/dohyun.kim/pretrained.pt')
 
-net = SimCLRNet(26, 1, 10, 32)
-net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/pretrained.pt'))
+'''
+net = Moco(256, 0.05)
+#net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/pretrained.pt'))
 net.eval()
 net.cuda()
+class Moco_Classification(nn.Module):
+    def __init__(self, net, num_classes=10):
+        super(Moco_Classification, self).__init__()
+        
+        self.num_classes = num_classes
+        
+        self.feat = net
+        self.classifier = nn.Linear(64,num_classes)
+        
+        
+        ### IMPLEMENTATION ENDS HERE ###
+    
+    def forward(self, x, norm_feat=False):
+        feat = self.feat(x)
+        logit = self.classifier(feat)
+        return feat, logit
+        
 def train2(net, train_loader, test_loader):
     
     loss_fn = nn.CrossEntropyLoss()
+    net2 = Moco_Classification(net,10)
   
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=1e-3)
+    net2.eval()
+    net2.cuda()
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, net2.parameters()), lr=1e-3)
     from warmup_scheduler import GradualWarmupScheduler
     scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=20, after_scheduler=optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=80))
     
     train_start = time.time()
-    
     for epoch in range(1, 100 + 1):
         
         train_loss = 0
@@ -316,7 +415,7 @@ def train2(net, train_loader, test_loader):
             optimizer.zero_grad()
             data = data.cuda()
             target = target.cuda()
-            data = net(data)[2]
+            data = net2(data)[1]
             loss = loss_fn(data, target)
             ### IMPLEMENTATION ENDS HERE ###
             
@@ -342,7 +441,7 @@ def train2(net, train_loader, test_loader):
             images, labels = test_data
             images = images.cuda()
             labels = labels.cuda()
-            outputs = net(images)[2]
+            outputs = net2(images)[1]
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
@@ -356,18 +455,18 @@ transform2 = transforms.Compose([
     transforms.ToTensor(),
 ])
 cnt=0
-for p in net.feat.parameters():
+for p in net.parameters():
     p.requires_grad = False
     cnt = cnt + 1
 print(cnt)
 
-train_dataset2 = datasets.CIFAR10(root='.',
+train_dataset2 = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
                                  train=True,
                                  download=True,
                                  transform=transform2
                                 )
 
-test_dataset2 = datasets.CIFAR10(root='.',
+test_dataset2 = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
                                  train=False,
                                  download=True,
                                  transform=transform2
@@ -387,4 +486,4 @@ test_loader2 = DataLoader(test_dataset2,
                           drop_last=True
                          )
 
-train2(net, train_loader2, test_loader2)
+train2(net.f_q, train_loader2, test_loader2)
