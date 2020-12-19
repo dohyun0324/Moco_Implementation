@@ -12,6 +12,10 @@ import os
 import time
 import math
 from torchvision.models.resnet import conv3x3
+
+B = 512
+
+
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, norm_layer, stride=1, downsample=None):
         super(BasicBlock, self).__init__()
@@ -149,7 +153,7 @@ import torchvision.transforms as transforms
 img_size = (32, 32)
 
 color_jitter = transforms.ColorJitter(0.8, 0.8, 0.8, 0.2)
-
+'''
 train_transform = DuplicatedCompose([
     transforms.RandomResizedCrop(size=(32,32)),
     transforms.RandomHorizontalFlip(p=0.5),
@@ -159,7 +163,20 @@ train_transform = DuplicatedCompose([
     transforms.ToTensor(),
 ])
 
-
+train_transform = DuplicatedCompose([
+    transforms.RandomResizedCrop((32,32), scale=(0.2, 1.)),
+    transforms.RandomGrayscale(p=0.2),
+    transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+])
+'''
+train_transform = DuplicatedCompose([
+    transforms.RandomResizedCrop((32,32)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomGrayscale(p=0.2),
+    transforms.ToTensor(),
+])
 from torch.utils.data import DataLoader
 
 train_dataset = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
@@ -169,7 +186,7 @@ train_dataset = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
                                 )
 
 train_loader = DataLoader(train_dataset,
-                          batch_size=256,
+                          batch_size=B,
                           num_workers=4,
                           shuffle=True,
                           drop_last=True
@@ -328,7 +345,8 @@ def train(net, loader):
     
     train_start = time.time()
     
-    for epoch in range(1, 50 + 1):
+    for epoch in range(1, 100 + 1):
+        print('hi')
         train_loss = 0
         net.train()
         epoch_start = time.time()
@@ -364,16 +382,16 @@ def train(net, loader):
 
 GPU_NUM = '0'
 os.environ["CUDA_VISIBLE_DEVICES"] = GPU_NUM
-'''
-net = Moco(256, 0.05)
+
+net = Moco(B, 0.05)
 
 net.cuda()
 train(net, train_loader)
-torch.save(net.state_dict(), '../../../home_klimt/dohyun.kim/pretrained.pt')
+torch.save(net.state_dict(), '../../../home_klimt/dohyun.kim/pretrained6.pt')
 
-'''
-net = Moco(256, 0.05)
-#net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/pretrained.pt'))
+
+net = Moco(B, 0.05)
+net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/pretrained6.pt'))
 net.eval()
 net.cuda()
 class Moco_Classification(nn.Module):
@@ -400,6 +418,8 @@ def train2(net, train_loader, test_loader):
   
     net2.eval()
     net2.cuda()
+    for pk in net.parameters():
+        pk.requires_grad = True
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, net2.parameters()), lr=1e-3)
     from warmup_scheduler import GradualWarmupScheduler
     scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=20, after_scheduler=optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=80))
@@ -408,7 +428,7 @@ def train2(net, train_loader, test_loader):
     for epoch in range(1, 100 + 1):
         
         train_loss = 0
-        net.train()
+        net2.train()
         
         epoch_start = time.time()
         for idx, (data, target) in enumerate(train_loader):
@@ -417,7 +437,6 @@ def train2(net, train_loader, test_loader):
             target = target.cuda()
             data = net2(data)[1]
             loss = loss_fn(data, target)
-            ### IMPLEMENTATION ENDS HERE ###
             
             train_loss += loss.item()
             
@@ -473,17 +492,17 @@ test_dataset2 = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
                                 )
 
 train_loader2 = DataLoader(train_dataset2,
-                          batch_size=256,
+                          batch_size=B,
                           num_workers=4,
                           shuffle=True,
                           drop_last=True
                          )
 
 test_loader2 = DataLoader(test_dataset2,
-                          batch_size=256,
+                          batch_size=B,
                           num_workers=4,
                           shuffle=True,
                           drop_last=True
                          )
 
-train2(net.f_q, train_loader2, test_loader2)
+train2(net.f_k, train_loader2, test_loader2)
