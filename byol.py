@@ -17,6 +17,9 @@ B = 256
 
 from torch.optim.optimizer import Optimizer, required
 
+dataset_path = '../../../home_klimt/dohyun.kim/'
+pretrained_path = '../../../home_klimt/dohyun.kim/pretrained_byol_depth_98.pt'
+
 class SGD_with_lars(Optimizer):
     r"""Implements stochastic gradient descent (optionally with momentum).
     """
@@ -235,7 +238,7 @@ train_transform = DuplicatedCompose([
 ])
 from torch.utils.data import DataLoader
 
-train_dataset = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
+train_dataset = datasets.CIFAR10(root=dataset_path,
                                  train=True,
                                  download=True,
                                  transform=train_transform
@@ -348,11 +351,11 @@ os.environ["CUDA_VISIBLE_DEVICES"] = GPU_NUM
 net = BYOL()
 net.cuda()
 train(net, train_loader)
-torch.save(net.state_dict(), '../../../home_klimt/dohyun.kim/pretrained_byol_depth_98.pt')
+torch.save(net.state_dict(), pretrained_path)
 
 
 net = BYOL()
-net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/pretrained_byol_depth_98.pt'))
+net.load_state_dict(torch.load(pretrained_path))
 net.eval()
 net.cuda()
 class BYOL_Classification(nn.Module):
@@ -427,13 +430,13 @@ transform2 = transforms.Compose([
     transforms.ToTensor(),
 ])
 
-train_dataset2 = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
+train_dataset2 = datasets.CIFAR10(root=dataset_path,
                                  train=True,
                                  download=True,
                                  transform=transform2
                                 )
 
-test_dataset2 = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
+test_dataset2 = datasets.CIFAR10(root=dataset_path,
                                  train=False,
                                  download=True,
                                  transform=transform2
