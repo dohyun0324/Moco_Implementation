@@ -15,6 +15,9 @@ from torchvision.models.resnet import conv3x3
 
 B = 256
 
+#TODO
+dataset_path = '../../../home_klimt/dohyun.kim/'
+pretrained_path = '../../../home_klimt/dohyun.kim/pretrained_depth_74.pt'
 
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, norm_layer, stride=1, downsample=None):
@@ -171,7 +174,7 @@ train_transform = DuplicatedCompose([
 '''
 from torch.utils.data import DataLoader
 
-train_dataset = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
+train_dataset = datasets.CIFAR10(root=dataset_path,
                                  train=True,
                                  download=True,
                                  transform=train_transform
@@ -362,11 +365,11 @@ net = Moco(B, 0.05)
 
 net.cuda()
 train(net, train_loader)
-torch.save(net.state_dict(), '../../../home_klimt/dohyun.kim/pretrained_depth_74.pt')
+torch.save(net.state_dict(), pretrained_path)
 
 
 net = Moco(B, 0.05)
-net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/pretrained_depth_74.pt'))
+net.load_state_dict(torch.load(pretrained_path))
 net.eval()
 net.cuda()
 
@@ -443,13 +446,13 @@ transform2 = transforms.Compose([
     transforms.ToTensor(),
 ])
 
-train_dataset2 = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
+train_dataset2 = datasets.CIFAR10(root=dataset_path,
                                  train=True,
                                  download=True,
                                  transform=transform2
                                 )
 
-test_dataset2 = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
+test_dataset2 = datasets.CIFAR10(root=dataset_path,
                                  train=False,
                                  download=True,
                                  transform=transform2
