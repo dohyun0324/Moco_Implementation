@@ -214,6 +214,7 @@ img_size = (32, 32)
 
 color_jitter = transforms.ColorJitter(0.8, 0.8, 0.8, 0.2)
 
+#3
 train_transform = DuplicatedCompose([
     ### IMPLEMENTATION 2-1 ###
     ### 1. Random resized crop w/ final size of (32, 32)
@@ -229,7 +230,24 @@ train_transform = DuplicatedCompose([
     ### IMPLEMENTATION ENDS HERE ###
     transforms.ToTensor(),
 ])
+#2
 
+'''
+train_transform = DuplicatedCompose([
+    transforms.RandomResizedCrop((32,32), scale=(0.2, 1.)),
+    transforms.RandomGrayscale(p=0.2),
+    transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+])
+#1
+train_transform = DuplicatedCompose([
+    transforms.RandomResizedCrop((32,32)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomGrayscale(p=0.2),
+    transforms.ToTensor(),
+])
+'''
 from torch.utils.data import DataLoader
 
 train_dataset = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
@@ -440,10 +458,10 @@ net = SimCLRNet(26, 1, 10, 32)
 
 net.cuda()
 train(net, train_loader)
-torch.save(net.state_dict(), '../../../home_klimt/dohyun.kim/pretrained.pt')
+torch.save(net.state_dict(), '../../../home_klimt/dohyun.kim/simclr9.pt')
 
 net = SimCLRNet(26, 1, 10, 32)
-net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/pretrained.pt'))
+net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/simclr9.pt'))
 net.eval()
 net.cuda()
 def train2(net, train_loader, test_loader):
