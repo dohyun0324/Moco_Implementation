@@ -13,7 +13,7 @@ import time
 import math
 from torchvision.models.resnet import conv3x3
 
-B = 512
+B = 256
 
 
 class BasicBlock(nn.Module):
@@ -98,18 +98,6 @@ class ResNetCifar(nn.Module):
         x = x.view(x.size(0), -1)
         return x
 
-    
-class Normalize(nn.Module):
-
-    def __init__(self, power=2):
-        super(Normalize, self).__init__()
-        self.power = power
-
-    def forward(self, x):
-        norm = x.pow(self.power).sum(1, keepdim=True).pow(1. / self.power)
-        out = x.div(norm)
-        return out
-    
 class DuplicatedCompose(object):
     def __init__(self, transforms):
         self.transforms = transforms
@@ -153,7 +141,8 @@ import torchvision.transforms as transforms
 img_size = (32, 32)
 
 color_jitter = transforms.ColorJitter(0.8, 0.8, 0.8, 0.2)
-'''
+
+#Augmentation 3
 train_transform = DuplicatedCompose([
     transforms.RandomResizedCrop(size=(32,32)),
     transforms.RandomHorizontalFlip(p=0.5),
@@ -162,7 +151,8 @@ train_transform = DuplicatedCompose([
     GaussianBlur(kernel_size=int(0.1*32)),
     transforms.ToTensor(),
 ])
-
+'''
+#Augmentation 2
 train_transform = DuplicatedCompose([
     transforms.RandomResizedCrop((32,32), scale=(0.2, 1.)),
     transforms.RandomGrayscale(p=0.2),
@@ -170,13 +160,15 @@ train_transform = DuplicatedCompose([
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
 ])
-'''
+
+#Augmentation 1
 train_transform = DuplicatedCompose([
     transforms.RandomResizedCrop((32,32)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomGrayscale(p=0.2),
     transforms.ToTensor(),
 ])
+'''
 from torch.utils.data import DataLoader
 
 train_dataset = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
@@ -193,81 +185,6 @@ train_loader = DataLoader(train_dataset,
                          )
 
 
-class Moco(torch.nn.Module):
-
-    def __init__(self, batch_size, temperature):
-        super(Moco, self).__init__()
-        self.batch_size = batch_size
-        self.temperature = temperature
-        self.softmax = torch.nn.Softmax(dim=-1)
-        self.criterion = torch.nn.CrossEntropyLoss(reduction="sum")
-        
-
-        self.f_q = ResNetCifar(depth=26, width=1, classes=10)
-        self.f_k = ResNetCifar(depth=26, width=1, classes=10)
-        for pq, pk in zip(self.f_q.parameters(), self.f_k.parameters()):
-            pk.data.copy_(pq.data)  # initialize
-            pk.requires_grad = False  # not update by gradient
-
-        self.K = 4096
-        self.m = 0.99
-        self.T = temperature
-        self.register_buffer("queue", torch.randn(64, self.K))
-        self.queue = nn.functional.normalize(self.queue, dim=0)
-        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
-
-    @torch.no_grad()
-    def _momentum_update_key_encoder(self):
-        for pq, pk in zip(self.f_q.parameters(), self.f_k.parameters()):
-            pk.data = pk.data * self.m + pq.data * (1. - self.m)
-
-    @torch.no_grad()
-    def _dequeue_and_enqueue(self, keys):
-        batch_size = keys.shape[0]
-
-        ptr = int(self.queue_ptr)
-        assert self.K % batch_size == 0  
-        self.queue[:, ptr:ptr + batch_size] = keys.t()  # transpose
-        ptr = (ptr + batch_size) % self.K  # move pointer
-
-        self.queue_ptr[0] = ptr
-
-    @torch.no_grad()
-    def _batch_shuffle_single_gpu(self, x):
-        idx_shuffle = torch.randperm(x.shape[0]).cuda()
-        idx_unshuffle = torch.argsort(idx_shuffle)
-
-        return x[idx_shuffle], idx_unshuffle
-
-    @torch.no_grad()
-    def _batch_unshuffle_single_gpu(self, x, idx_unshuffle):
-        return x[idx_unshuffle]
-
-    def forward(self, x_q, x_k):
-        with torch.no_grad():  # no gradient to keys
-            self._momentum_update_key_encoder()
-
-        q = self.f_q(x_q)
-        q = nn.functional.normalize(q, dim=1)  # already normalized
-        with torch.no_grad():
-            x_k_, idx_unshuffle = self._batch_shuffle_single_gpu(x_k)
-
-            k = self.f_k(x_k_)  # keys: NxC
-            k = nn.functional.normalize(k, dim=1)  # already normalized
-            k = self._batch_unshuffle_single_gpu(k, idx_unshuffle)
-
-        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
-       # print(q.shape,k.shape)
-        #print(q.shape,self.queue.shape)
-        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
-        
-        logits = torch.cat([l_pos, l_neg], dim=1)
-        logits /= self.T
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
-        loss = self.criterion(logits, labels)
-        self._dequeue_and_enqueue(k)
-     #   print(loss)
-        return loss
 
 from torch.optim.optimizer import Optimizer, required
 
@@ -337,6 +254,70 @@ class SGD_with_lars(Optimizer):
 
         return loss
 
+
+
+class Moco(torch.nn.Module):
+
+    def __init__(self, batch_size, temp):
+        super(Moco, self).__init__()
+        self.criterion = torch.nn.CrossEntropyLoss(reduction="sum")
+        
+        self.f_q = ResNetCifar(depth=74, width=1, classes=10)
+        self.f_k = ResNetCifar(depth=74, width=1, classes=10)
+        for pq, pk in zip(self.f_q.parameters(), self.f_k.parameters()):
+            pk.data.copy_(pq.data)
+            pk.requires_grad = False 
+
+        self.K = 4096
+        self.m = 0.99
+        self.T = temp
+        self.register_buffer("queue", torch.randn(self.K, 64))
+        self.queue = nn.functional.normalize(self.queue, dim=0)
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+
+    @torch.no_grad()
+    def dqeq(self, keys):
+        batch_size = keys.shape[0]
+
+        ptr = int(self.queue_ptr)
+        self.queue[ptr:ptr + batch_size, :] = keys
+        ptr = (ptr + batch_size) % self.K
+        self.queue_ptr[0] = ptr
+
+    @torch.no_grad()
+    def shuffle(self, x):
+        idx_shuffle = torch.randperm(x.shape[0]).cuda()
+        idx_unshuffle = torch.argsort(idx_shuffle)
+
+        return x[idx_shuffle], idx_unshuffle
+
+    @torch.no_grad()
+    def unshuffle(self, x, idx_unshuffle):
+        return x[idx_unshuffle]
+
+    def forward(self, x_q, x_k):
+        with torch.no_grad():
+            for pq, pk in zip(self.f_q.parameters(), self.f_k.parameters()):
+                pk.data = pk.data * self.m + pq.data * (1. - self.m)
+
+        q = self.f_q(x_q)
+        q = nn.functional.normalize(q, dim=1) 
+        with torch.no_grad():
+            x_k_shuffled, idx_unshuffle = self.shuffle(x_k)
+
+            k = self.f_k(x_k_shuffled)
+            k = nn.functional.normalize(k, dim=1)
+            k = self.unshuffle(k, idx_unshuffle)
+
+        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().t().detach()])
+        
+        logits = torch.cat([l_pos, l_neg], dim=1) / self.T
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        loss = self.criterion(logits, labels)
+        self.dqeq(k)
+        return loss
+
 def train(net, loader):
     optimizer = SGD_with_lars(net.parameters(), lr=0.1, momentum = 0.9, weight_decay = 1e-6)
     
@@ -352,16 +333,10 @@ def train(net, loader):
         epoch_start = time.time()
         for idx, (data, target) in enumerate(loader):
             optimizer.zero_grad()
-            
-            ### 3. data variable contains two augmented images
-            ### -1. send them to your GPU by calling .cuda()
-            ### -2. forward each of them to net
-            ### -3. compute the InfoNCE loss
-            
+
             dat1 = data[0].cuda()
             dat2 = data[1].cuda()
             loss = net(dat1, dat2)
-            ### IMPLEMENTATION ENDS HERE ###
             
             train_loss += loss.item()
             
@@ -387,13 +362,14 @@ net = Moco(B, 0.05)
 
 net.cuda()
 train(net, train_loader)
-torch.save(net.state_dict(), '../../../home_klimt/dohyun.kim/pretrained6.pt')
+torch.save(net.state_dict(), '../../../home_klimt/dohyun.kim/pretrained_depth_74.pt')
 
 
 net = Moco(B, 0.05)
-net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/pretrained6.pt'))
+net.load_state_dict(torch.load('../../../home_klimt/dohyun.kim/pretrained_depth_74.pt'))
 net.eval()
 net.cuda()
+
 class Moco_Classification(nn.Module):
     def __init__(self, net, num_classes=10):
         super(Moco_Classification, self).__init__()
@@ -402,9 +378,6 @@ class Moco_Classification(nn.Module):
         
         self.feat = net
         self.classifier = nn.Linear(64,num_classes)
-        
-        
-        ### IMPLEMENTATION ENDS HERE ###
     
     def forward(self, x, norm_feat=False):
         feat = self.feat(x)
@@ -419,7 +392,7 @@ def train2(net, train_loader, test_loader):
     net2.eval()
     net2.cuda()
     for pk in net.parameters():
-        pk.requires_grad = True
+        pk.requires_grad = False
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, net2.parameters()), lr=1e-3)
     from warmup_scheduler import GradualWarmupScheduler
     scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=20, after_scheduler=optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=80))
@@ -447,10 +420,6 @@ def train2(net, train_loader, test_loader):
         scheduler.step()
         
         epoch_time = time.time() - epoch_start
-       # print("Epoch\t", epoch, 
-       #       "\tLoss\t", train_loss, 
-       #       "\tTime\t", epoch_time,
-       #      )
         
         if epoch % 10 == 0:
           net.eval()
@@ -473,11 +442,6 @@ def train2(net, train_loader, test_loader):
 transform2 = transforms.Compose([
     transforms.ToTensor(),
 ])
-cnt=0
-for p in net.parameters():
-    p.requires_grad = False
-    cnt = cnt + 1
-print(cnt)
 
 train_dataset2 = datasets.CIFAR10(root='../../../home_klimt/dohyun.kim/',
                                  train=True,
@@ -505,4 +469,4 @@ test_loader2 = DataLoader(test_dataset2,
                           drop_last=True
                          )
 
-train2(net.f_k, train_loader2, test_loader2)
+train2(net.f_q, train_loader2, test_loader2)
